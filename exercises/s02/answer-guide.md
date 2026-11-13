@@ -1,49 +1,42 @@
-# 記入例と判断理由（演習後に参照）
+# S02判断例
 
-この資料は、まず `worksheet.md` を記入してから開いてください。以下は一つの判断例であり、自動採点や唯一の正解ではありません。演習ケースには実際の観測結果がないため、結果を知っているように書かないことが大切です。
+この資料は考え方の一例です。実AWS runの観測値を与えるものではなく、自動採点もしません。手元で得た実際の応答・logと、架空Northstar Retailのtabletopを混ぜずに照らし合わせてください。
 
-## 役割の例
+## 実アプリの読み方
 
-- SRE当番: 時系列をまとめ、次回更新を管理する。
-- アプリ担当: 5xxの時刻とリリース差分を照合する。
-- DB担当: 遅延の開始時刻と範囲を調べる。
-- セキュリティ担当: role sessionのidentity情報と対象時間の記録を調べる。
-- サービス責任者: 本番変更の判断を行う役割の例。実際の承認者は組織ごとに確認する。
+- successの200はアプリが注文を処理した結果です。responseのrequestIdで同じIDの`request_complete` logを探します。
+- validationの400はアプリの入力検証が返した応答です。IAM拒否ではありません。
+- injected_failureの500はサンプル内で意図して発生させたアプリ例外です。AWS Lambdaサービス障害を示す証拠ではありません。
+- bounded_delayの200では、固定された待ち時間とアプリ内`durationMs`を確認します。これはLambda請求時間と等しい値ではありません。
+- untrusted_inputの200では固定例文が`untrustedInput`として記録されることを確認します。検知、実行、AI防御の結果と解釈しません。
+- HTTP responseとアプリ完了logの照合には同一requestIdを使います。AWS LambdaのSTART/END/REPORT行とアプリJSON logは別の記録です。
 
-## 時系列の例
+実行前の例示JSONや期待statusは実測値ではありません。空欄や不一致は、実runで確認した観測をそのまま書き、期待値へ書き換えません。
 
-| 時刻・時間関係 | 観測事実 | 仮説 | 未確認 |
-|---|---|---|---|
-| アラート18分前 | リリース展開が始まり、リクエスト解析が変更された | 変更が5xxに影響した可能性 | 変更とエラーの因果、適用対象と範囲 |
-| 10:00 | `shop-api` の5xx増加アラート |  | 原因、利用者影響、継続状況 |
-| 10:00時点 | `orders-db` の応答遅延が報告された | 5xxと関連する可能性 | 遅延の開始時刻、両者の因果、影響範囲 |
-| 発生時刻不明 | 通常と異なるrole session記録が見つかった | 意図しない利用の可能性 | principal、送信元、操作、セッションの開始時刻、侵害の有無 |
+## IAM許可・拒否・復元の判断
 
-## 証跡選択の例
+Function URLの`AuthType`は`AWS_IAM`のままです。caller roleに必要なのは対象関数への`lambda:InvokeFunctionUrl`と`lambda:InvokeFunction`です。後者は`lambda:InvokedViaFunctionUrl=true`条件でFunction URL経由に限定します。
 
-初期確認の一例は、`shop-api` の時刻付き指標、リリース記録と差分、role sessionの監査記録です。アラートの時間変化と変更内容、未照合のsessionをそれぞれ担当者に確認できます。`orders-db` の遅延指標もDB担当を決めて後続確認に残します。
+1. **許可:** 専用caller roleで固定requestを送り、200とLambda requestIdを得ます。対応するアプリJSON logをrequestIdで確認します。
+2. **拒否:** 専用callerからそのinvoke policyだけを外し、同じ入力を1回送ります。Function URLが認可段階で拒否した場合、403等のHTTP statusやAccessDenied本文が観測されることがあります。Lambda handlerへ届かなければ、Lambda requestIdやアプリ`request_complete` logはありません。AWS request identifierも実際に返った場合だけ記録します。
+3. **復元:** 同じ2 action、同じResource、同じFunction URL条件を専用callerへ戻し、同じrequestを一度送ります。200、requestId、対応logが戻るかを確認します。
 
-これが常に最適な3点とは限りません。role sessionの活動が継続中か、各証跡をいつまで取得できるか、サービス影響がどの程度かによって順序を変えられます。必要な封じ込めを証跡確認の完了まで待たせず、並行して責任者へ判断を求めます。証跡には出所、対象時間、収集担当を残します。
+ここで示すのは、このFunction URLを呼び出すIAM許可の実験です。全AWS操作の権限、アカウントのsecurity posture、CloudTrailの有効性、攻撃や侵害の有無を結論しません。login role、permission set、アカウントassignment、既存callerやresource policyを変更する必要はありません。
 
-## 判断の例
+## 拒否時に記録がない場合
 
-例えば、サービス責任者へ新たなrolloutの一時停止を提案し、アプリ・DB・セキュリティ担当が調査を続ける方法があります。一時停止は適用済み変更を戻しません。
+拒否responseにLambda requestIdがなく、同時刻に該当アプリ完了logがないなら「Function URLの認可で拒否され、handler処理に到達した証拠はない」と記録できます。存在しないIDやlogを作らないでください。CloudTrailは元から有効でアクセス可能な場合に限り補助証跡として確認し、この演習のために新規有効化しません。
 
-rollbackを選ぶなら、以前の版と現在のデータや依存先の互換性、操作権限、変更後のhealth確認方法を先に確かめます。エラーや遅延を悪化させる可能性がある、または安全に戻せない場合は実施を止め、責任者へ別の封じ込め策を相談します。
+404やtimeoutなど予想と異なる結果の場合は、同じ入力を連打せず、Function URL、AWS identity、Region、policy、対象関数、CloudFormation状態を確認します。原因を切り分けてから再試行は最大1回です。
 
-他の選択も、根拠、不足情報、利用者影響、判断・承認、実施後に見る結果、戻す条件を説明できれば検討対象になります。緊急の影響抑制が必要な状況と、平行して取得できる証跡を分けて記録します。
+## cleanupと費用
 
-## 4文更新の例
+専用caller roleの追加policyとroleを削除し、アプリstackを削除します。Lambda、Function URL、実行role、CloudWatch log group、caller role、policyの不在をそれぞれ確認します。CloudShell一時fileやprocessは必要な根拠を保存した後に整理します。CloudShell terminalを終了してからtabを閉じます。STS sessionの期限が残る場合は期限と利用可否を明記し、削除可能と断定しません。
 
-1. 10:00に `shop-api` の5xx増加アラートが届き、同時刻時点で `orders-db` の遅延も報告されています。
-2. 18分前にリリース展開が始まっていますが、エラーとの因果、利用者影響、role sessionの主体と送信元は未確認です。
-3. アプリ担当は指標とリリース差分、DB担当は遅延、セキュリティ担当は対象時間の監査記録を確認し、サービス責任者が変更を判断します。
-4. 初回確認の結果をまとめ、（担当者が決めた時刻）に次回更新します。
+Lambdaのrequest/実行時間、CloudWatch Logs取り込み/保存、resource稼働時間などの料金はregion・利用条件で異なります。Pricing Calculatorの仮定に基づく見積もり、確認できた実費、未確認の実費を分けて記録します。無料利用枠や厳密な費用上限は保証しません。
 
-この例は侵害、復旧、データ漏えいの有無を断定していません。実際の連絡では、得られた根拠と利用者影響に応じて内容や時刻を更新します。
+## 架空tabletopの判断例
 
-## AWS記録に関する注意
+開始カードだけでは、不正アクセス、データ漏えい、deploy起因の障害のいずれも確定しません。最初にincident lead、サービス担当、security担当、記録担当と変更承認者を決め、影響時間帯のdeploy、対象サービス、該当するrequest/log、role sessionのprincipal・送信元・操作記録を照合します。組織の保全方針に従いread-only証跡を保全します。
 
-CloudTrailではrole sessionの情報がイベントのidentity/session項目に記録される場合があります。項目の有無や内容はイベントと設定に依存します。`sourceIdentity` はすべてのrole sessionで必ず記録されるものではありません。見つからない項目から「不正だった」「記録がないので安全」と結論せず、出所、イベント時刻、記録対象と保存範囲を確認します。
-
-参考: [AWS CloudTrail userIdentity element](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-user-identity.html)
+rollbackや展開停止は、利用者影響、変更との関連、切り戻しの副作用、判断権限を踏まえて責任者が決めます。選んだ措置、その期待効果、確認指標、rollback条件と次回報告時刻を記録します。これは架空の判断例で、実アプリの500やIAM拒否をNorthstarの証拠として使うものではありません。
